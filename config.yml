@@ -92,7 +92,7 @@ schema:
       - type: unsigned
         name: bucket_id
         is_nullable: false
-      - type: map
+      - type: any
         name: data
         is_nullable: false
 extensions/api/cache/flush_cache_endpoint.lua: |-
