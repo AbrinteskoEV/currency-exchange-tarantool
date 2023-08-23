@@ -1,0 +1,218 @@
+---
+extensions/example.lua: |
+  -- local M = {}
+
+  -- function M.hello_http(req)
+  --     local name = req:param('name') or '%username%'
+  --     return {
+  --         status = 200,
+  --         body = 'Hello, ' .. name .. '!\n'
+  --     }
+  -- end
+
+  -- return M
+extensions/api/cache/store_cache_endpoint.lua: |-
+  local cartridge = require('cartridge')
+  local crud = require('crud')
+  local json = require('json')
+  loadfile('response_helper.lua')
+  loadfile('request_validator.lua')
+
+  function store_cache(request)
+      local rules = {
+          cache_key = { "required", "string" },
+          data = { "required" },
+      }
+
+      local validation_error = validate_post_request(request, rules)
+      if validation_error ~= nil then
+          return validation_failed(validation_error)
+      end
+
+      flush_cache(request)
+      local cache_key = request:post_param("cache_key")
+      local data = request:post_param("data")
+      local result, err = crud.insert_object('cache', { cache_key = cache_key, data = data })
+      if err ~= nil then
+          return error(err)
+      end
+
+      local tuple = result.rows[1]
+      return success(tuple)
+  end
+
+  return { store_cache = store_cache }
+extensions/api/response_helper.lua: |-
+  local json = require('json')
+
+  function success(result)
+      return { body = json.encode({success = true, data = result}), status = 200 }
+  end
+
+  function error(error)
+      return { body = json.encode({success = false, data = {message = error}}), status = 500 }
+  end
+
+  function validation_failed(error)
+      return { body = json.encode({success = false, data = {message = error}}), status = 400 }
+  end
+
+  return {
+      success = success,
+      error = error,
+      validation_failed = validation_failed
+  }
+schema:
+  spaces:
+    cache:
+      sharding_key:
+      - cache_key
+      temporary: false
+      engine: memtx
+      is_local: false
+      indexes:
+      - unique: true
+        parts:
+        - path: cache_key
+          type: string
+          is_nullable: false
+        type: TREE
+        name: cache_key
+      - unique: false
+        parts:
+        - path: bucket_id
+          type: unsigned
+          is_nullable: false
+        type: TREE
+        name: bucket_id
+      format:
+      - type: string
+        name: cache_key
+        is_nullable: false
+      - type: unsigned
+        name: bucket_id
+        is_nullable: false
+      - type: map
+        name: data
+        is_nullable: false
+extensions/api/cache/flush_cache_endpoint.lua: |-
+  local cartridge = require('cartridge')
+  local crud = require('crud')
+  local json = require('json')
+  loadfile('response_helper.lua')
+  loadfile('request_validator.lua')
+
+  function flush_cache(request)
+      local rules = {
+          cache_key = { "required", "string" }
+      }
+
+      local validation_error = validate_post_request(request, rules)
+      if validation_error ~= nil then
+          return validation_failed(validation_error)
+      end
+
+      local cache_key = request:post_param("cache_key")
+      local result, err = crud.select('cache', {{'==', 'cache_key', cache_key}})
+
+      if err ~= nil then
+          return error(err)
+      end
+
+      local tuple = result.rows[1]
+
+      if tuple == nil then
+          return success(nil)
+      end
+
+      local tuple_key = tuple[1]
+
+      local deletion_result, deletion_err = crud.delete('cache', tuple_key)
+
+      if deletion_err ~= nil then
+          return error(err)
+      end
+
+      local tuple = deletion_result.rows[1]
+      return success(tuple)
+  end
+
+  return { flush_cache = flush_cache }
+extensions/api/request_validator.lua: "function validate_get_request(request, rules)\n
+  \   for field_name, restriction_list in pairs(rules) do\n        local field_value
+  = request:query_param(field_name)\n        local error_message = validate_field(field_value,
+  restriction_list)\n        if error_message ~= nil then\n            return \"Field
+  '\" .. field_name .. \"' \" .. error_message\n        end\n    end\n\n    return
+  nil\nend\n\nfunction validate_post_request(request, rules)\n    for field_name,
+  restriction_list in pairs(rules) do\n        local field_value = request:post_param(field_name)\n
+  \       local error_message = validate_field(field_value, restriction_list)\n        if
+  error_message ~= nil then\n            return \"Field '\" .. field_name .. \"' \"
+  .. error_message\n        end\n    end\n\n    return nil\nend\n\nfunction validate_field(field_value,
+  restriction_list)\n    for _, restriction in ipairs(restriction_list) do\n        if
+  restriction == \"required\" and field_value == nil then\n            return \"is
+  required!\"\n        elseif restriction == \"string\" and type(field_value) ~= \"string\"
+  then\n            return \"must be string!\"\n        elseif restriction == \"numeric\"
+  and type(field_value) ~= \"number\" then\n            return \"must be numeric!\"\n
+  \       elseif restriction == \"array\" and type(field_value) ~= \"table\" then\n
+  \           return \"must be array!\"\n        end \n    end\n\n    return nil\nend\n\nreturn
+  {\n    validate_post_request = validate_post_request,\n    validate_get_request
+  = validate_get_request,\n}"
+extensions/config:
+  functions:
+    get_cache:
+      module: extensions.api.cache.get_cache_endpoint
+      handler: get_cache
+      events:
+      - http:
+          path: /cache
+          method: GET
+    flush_cache:
+      module: extensions.api.cache.flush_cache_endpoint
+      handler: flush_cache
+      events:
+      - http:
+          path: /cache/delete
+          method: POST
+    store_cache:
+      module: extensions.api.cache.store_cache_endpoint
+      handler: store_cache
+      events:
+      - http:
+          path: /cache
+          method: POST
+extensions/api/cache/get_cache_endpoint.lua: |-
+  local cartridge = require('cartridge')
+  local crud = require('crud')
+  local json = require('json')
+  loadfile('response_helper.lua')
+  loadfile('request_validator.lua')
+
+  function get_cache(request)
+      local rules = {
+          cache_key = { "required", "string" }
+      }
+
+      local validation_error = validate_get_request(request, rules)
+      if validation_error ~= nil then
+          return validation_failed(validation_error)
+      end
+
+      local cache_key = request:query_param("cache_key")
+
+      local result, err = crud.select('cache', {{'==', 'cache_key', cache_key}})
+      if err ~= nil then
+          return error(err)
+      end
+
+      local data = nil
+      local tuple = result.rows[1]
+
+      if tuple ~= nil then
+          data = tuple[3]
+      end
+
+      return success(data)
+  end
+
+  return { get_cache = get_cache }
+...
